@@ -21,7 +21,7 @@ A custom ComfyUI node that uploads images directly to Google Drive. Designed for
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone <your-repo-url> comfyui-google-drive-upload
+git clone https://github.com/theclueless-ai/comfyui-google-drive-upload
 cd comfyui-google-drive-upload
 pip install -r requirements.txt
 ```
