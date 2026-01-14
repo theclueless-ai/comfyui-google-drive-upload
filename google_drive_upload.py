@@ -1,6 +1,6 @@
 """
 ComfyUI Custom Node: Google Drive Image Upload
-Uploads images from ComfyUI workflows to Google Drive using a Service Account.
+Uploads images from ComfyUI workflows to Google Drive using OAuth 2.0.
 
 For use with ComfyDeploy or any ComfyUI installation.
 """
@@ -8,15 +8,14 @@ For use with ComfyDeploy or any ComfyUI installation.
 import os
 import io
 import json
-import base64
-import tempfile
 from datetime import datetime
 from typing import Tuple
 
 import numpy as np
 from PIL import Image
 
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
@@ -24,10 +23,10 @@ from googleapiclient.http import MediaIoBaseUpload
 class GoogleDriveUpload:
     """
     ComfyUI node that uploads images to a specified Google Drive folder.
-    Uses Service Account authentication for serverless environments.
+    Uses OAuth 2.0 authentication for personal Google Drive accounts.
     """
     
-    SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    SCOPES = ['https://www.googleapis.com/auth/drive']
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -54,10 +53,10 @@ class GoogleDriveUpload:
                 "add_timestamp": ("BOOLEAN", {"default": True}),
             },
             "optional": {
-                "service_account_json": ("STRING", {
+                "credentials_json": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "placeholder": "Paste Service Account JSON here (optional if using env var)"
+                    "placeholder": "Optional: JSON with client_id, client_secret, refresh_token"
                 }),
             }
         }
@@ -68,62 +67,67 @@ class GoogleDriveUpload:
     CATEGORY = "image/output"
     OUTPUT_NODE = True
 
-    def get_credentials(self, service_account_json: str = ""):
+    def get_credentials(self, credentials_json: str = ""):
         """
-        Get Google credentials from either:
-        1. Direct JSON input (service_account_json parameter)
-        2. Base64 encoded environment variable (GOOGLE_SERVICE_ACCOUNT_BASE64)
-        3. JSON string environment variable (GOOGLE_SERVICE_ACCOUNT_JSON)
-        4. File path environment variable (GOOGLE_APPLICATION_CREDENTIALS)
+        Get Google OAuth credentials from either:
+        1. Direct JSON input with client_id, client_secret, refresh_token
+        2. Environment variables: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
         """
+        
+        client_id = None
+        client_secret = None
+        refresh_token = None
         
         # Priority 1: Direct JSON input from node
-        if service_account_json and service_account_json.strip():
+        if credentials_json and credentials_json.strip():
             try:
-                credentials_dict = json.loads(service_account_json.strip())
-                return service_account.Credentials.from_service_account_info(
-                    credentials_dict, scopes=self.SCOPES
-                )
+                creds_dict = json.loads(credentials_json.strip())
+                client_id = creds_dict.get('client_id')
+                client_secret = creds_dict.get('client_secret')
+                refresh_token = creds_dict.get('refresh_token')
             except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON in service_account_json input: {e}")
+                raise ValueError(f"Invalid JSON in credentials_json input: {e}")
         
-        # Priority 2: Base64 encoded environment variable
-        base64_creds = os.environ.get('GOOGLE_SERVICE_ACCOUNT_BASE64')
-        if base64_creds:
-            try:
-                decoded = base64.b64decode(base64_creds).decode('utf-8')
-                credentials_dict = json.loads(decoded)
-                return service_account.Credentials.from_service_account_info(
-                    credentials_dict, scopes=self.SCOPES
-                )
-            except Exception as e:
-                raise ValueError(f"Failed to decode GOOGLE_SERVICE_ACCOUNT_BASE64: {e}")
+        # Priority 2: Environment variables (fallback for missing values)
+        if not client_id:
+            client_id = os.environ.get('GOOGLE_CLIENT_ID')
+        if not client_secret:
+            client_secret = os.environ.get('GOOGLE_CLIENT_SECRET')
+        if not refresh_token:
+            refresh_token = os.environ.get('GOOGLE_REFRESH_TOKEN')
         
-        # Priority 3: JSON string environment variable
-        json_creds = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
-        if json_creds:
-            try:
-                credentials_dict = json.loads(json_creds)
-                return service_account.Credentials.from_service_account_info(
-                    credentials_dict, scopes=self.SCOPES
-                )
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
-        
-        # Priority 4: File path (standard Google approach)
-        file_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-        if file_path and os.path.exists(file_path):
-            return service_account.Credentials.from_service_account_file(
-                file_path, scopes=self.SCOPES
+        # Validate we have all required values
+        if not all([client_id, client_secret, refresh_token]):
+            missing = []
+            if not client_id:
+                missing.append("client_id / GOOGLE_CLIENT_ID")
+            if not client_secret:
+                missing.append("client_secret / GOOGLE_CLIENT_SECRET")
+            if not refresh_token:
+                missing.append("refresh_token / GOOGLE_REFRESH_TOKEN")
+            
+            raise ValueError(
+                f"Missing OAuth credentials: {', '.join(missing)}\n\n"
+                "Please provide credentials via:\n"
+                "1. The 'credentials_json' input field with JSON containing client_id, client_secret, refresh_token\n"
+                "2. Environment variables: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN\n\n"
+                "Run the get_refresh_token.py script to generate these values."
             )
         
-        raise ValueError(
-            "No Google credentials found. Please provide credentials via:\n"
-            "1. The 'service_account_json' input field\n"
-            "2. GOOGLE_SERVICE_ACCOUNT_BASE64 environment variable\n"
-            "3. GOOGLE_SERVICE_ACCOUNT_JSON environment variable\n"
-            "4. GOOGLE_APPLICATION_CREDENTIALS file path"
+        # Create credentials object
+        credentials = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri='https://oauth2.googleapis.com/token',
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=self.SCOPES
         )
+        
+        # Refresh the token to get a valid access token
+        credentials.refresh(Request())
+        
+        return credentials
 
     def tensor_to_pil(self, image_tensor) -> Image.Image:
         """Convert ComfyUI image tensor to PIL Image."""
@@ -153,7 +157,7 @@ class GoogleDriveUpload:
         image_format: str,
         jpeg_quality: int,
         add_timestamp: bool,
-        service_account_json: str = ""
+        credentials_json: str = ""
     ) -> Tuple[str, str]:
         """
         Upload image to Google Drive.
@@ -176,7 +180,7 @@ class GoogleDriveUpload:
                 folder_id = folder_id.split('/')[-1]
             
             # Get credentials
-            credentials = self.get_credentials(service_account_json)
+            credentials = self.get_credentials(credentials_json)
             
             # Build Drive service
             service = build('drive', 'v3', credentials=credentials)
